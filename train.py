@@ -1,5 +1,6 @@
 import argparse
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -31,7 +32,7 @@ def parse_args():
         'k_h': 20,
         'n_heads': 2,
         'dataset': 'DB15K',
-        'pre_trained': 0,
+        'pre_trained': 1,
         'encoder': 0,
         'image_features': 1,
         'text_features': 1,
@@ -47,11 +48,14 @@ def parse_args():
         'out_channels': 32,
         'kernel_size': 3,
         'batch_size': 1024,
-        'save': 1,
+        'save': 0,
         'n_exp': 3,
         'mu': 0.0001,
+        'mu_clip': 0.05,
         'img_dim': 256,
-        'txt_dim': 256
+        'txt_dim': 256,
+        'clip_dim': 256,
+        'diffusion_image_dim': 256,
     }
 
     parser = argparse.ArgumentParser()
@@ -112,6 +116,13 @@ def train_decoder(args):
     corpus.batch_size = args.batch_size
     corpus.neg_num = args.neg_num
     training_range = tqdm(range(args.epochs))
+
+    # ce_loss = torch.nn.CrossEntropyLoss()
+    # if args.cuda is not None and int(args.cuda) >= 0:
+    #     ce_loss = ce_loss.to(args.device)
+
+    early_stop = 6000
+    
     for epoch in training_range:
         model.train()
         epoch_loss = []
@@ -122,26 +133,45 @@ def train_decoder(args):
             # Training the KGC model
             estimator.eval()
             optimizer.zero_grad()
-            train_indices, train_values = corpus.get_batch(batch_num)
-            train_indices = torch.LongTensor(train_indices)
-            if args.cuda is not None and int(args.cuda) >= 0:
-                train_indices = train_indices.to(args.device)
-                train_values = train_values.to(args.device)
-            output, embeddings = model.forward(train_indices)
-            loss = model.loss_func(output, train_values) + args.mu * estimator(embeddings)
+            train_indices, train_values = corpus.get_batch(batch_num, device=args.device)
+            # train_indices = torch.LongTensor(train_indices)
+            # if args.cuda is not None and int(args.cuda) >= 0:
+            #     train_indices = train_indices.to(args.device)
+            #     train_values = train_values.to(args.device)
+            model.train()
+            if epoch >= early_stop:
+                model.freeze_experts()
+                for param in estimator.parameters():
+                    param.requires_grad = False
+            output, embeddings, extra_embeddings, bias = model.forward(train_indices)
+            # labels = torch.arange(logits.shape[0])
+            # if args.cuda is not None and int(args.cuda) >= 0:
+            #     labels = labels.to(args.device)
+            # loss_i = ce_loss(logits, labels)
+            # loss_t = ce_loss(logits.T, labels)
+            model_loss = model.loss_func(output, train_values, weights=None, extra=False)
+            exp_loss = estimator(embeddings, extra_embeddings)
+            # exp_loss_cross = estimator(embeddings_cross, is_cross=True)
+            # loss = model_loss + args.mu * exp_loss + args.mu_clip * (loss_i + loss_t) / 2
+            # loss = (model_loss + args.mu * (exp_loss + exp_loss_cross) / 2.0)
+            loss = (model_loss + args.mu * exp_loss)
             loss.backward()
             optimizer.step()
+            epoch_loss.append(loss.data.item())
             # Train the estimator
+            if epoch >= early_stop:
+                continue
             estimator.train()
             optimizer_mi.zero_grad()
             with torch.no_grad():
-                embeddings = model.get_batch_embeddings(train_indices)
-            estimator_loss = estimator.train_estimator(embeddings)
+                embeddings, extra_embeddings = model.get_batch_embeddings(train_indices)
+            estimator_loss = estimator.train_estimator(embeddings, extra_embeddings)
+            # estimator_loss = (estimator.train_estimator(embeddings) + estimator.train_estimator(embeddings_cross, is_cross=True)) / 2.0
             estimator_loss.backward()
             optimizer_mi.step()
             epoch_loss.append(loss.data.item())
             epoch_mi_loss.append(estimator_loss.item())
-        training_range.set_postfix(loss="main: {:.5} mi: {:.5}".format(sum(epoch_loss), sum(epoch_mi_loss)))
+        training_range.set_postfix(loss="main: {:.5g} mi: {:.5g}".format(sum(epoch_loss), sum(epoch_mi_loss)))
         lr_scheduler.step()
 
         if (epoch + 1) % args.eval_freq == 0:
@@ -149,7 +179,7 @@ def train_decoder(args):
                 epoch + 1, sum(epoch_loss) / len(epoch_loss), time.time() - t))
             model.eval()
             with torch.no_grad():
-                val_metrics = corpus.get_validation_pred(model, 'test')
+                val_metrics, atten = corpus.get_validation_pred(model, 'test', round=epoch, device=args.device)
             if val_metrics['MRR'] > best_test_metrics['MRR']:
                 best_test_metrics['MRR'] = val_metrics['MRR']
             if val_metrics['MR'] < best_test_metrics['MR']:
@@ -162,8 +192,17 @@ def train_decoder(args):
                 best_test_metrics['Hits@10'] = val_metrics['Hits@10']
             if val_metrics['Hits@100'] > best_test_metrics['Hits@100']:
                 best_test_metrics['Hits@100'] = val_metrics['Hits@100']
+            weights = []
+            for att in atten:
+                weights.append(torch.mean(torch.stack([a[-1] for a in att]), dim=0))
+            print('Attention weights:', weights)
+            print('Bias:', bias)
             print('\n'.join(['Epoch: {:04d}'.format(epoch + 1), model.format_metrics(val_metrics, 'test')]))
-            print("\n\n")
+            # print('\n', 'model loss:', model_loss.item(), '  expert loss:', exp_loss.item(), exp_loss_cross.item())
+            print('\n', 'model loss:', model_loss.item(), '  expert loss:', exp_loss.item())
+            # fusion_weights = model.get_fusion_weights()
+            # print('Fusion weights:', ['{:.4f}'.format(w) for w in fusion_weights])
+            print("\n\n", flush=True)
 
 
     print('Total time elapsed: {:.4f}s'.format(time.time() - t_total))
@@ -171,13 +210,16 @@ def train_decoder(args):
         model.eval()
         estimator.eval()
         with torch.no_grad():
-            best_test_metrics = corpus.get_validation_pred(model, 'test')
+            best_test_metrics, _ = corpus.get_validation_pred(model, 'test')
     print('\n'.join(['Val set results:', model.format_metrics(best_val_metrics, 'val')]))
     print('\n'.join(['Test set results:', model.format_metrics(best_test_metrics, 'test')]))
-    print("\n\n\n\n\n\n")
+    print("\n\n\n\n\n\n", flush=True)
 
     if args.save:
-        torch.save(model.state_dict(), f'./checkpoint/{args.dataset}/{args.model}.pth')
+        import os
+        os.makedirs(f'./checkpoint/{args.dataset}', exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        torch.save(model.state_dict(), f'./checkpoint/{args.dataset}/{args.model + timestamp}.pth')
         print('Saved model!')
 
 

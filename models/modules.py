@@ -77,36 +77,86 @@ class MIEstimator(nn.Module):
         super(MIEstimator, self).__init__()
         self.str_estimator = CLUBSample(args.dim, args.dim, args.dim)
         self.img_estimator = CLUBSample(args.img_dim, args.img_dim, args.img_dim)
+        self.c_img_estimator = CLUBSample(args.img_dim, args.img_dim, args.img_dim)
+        self.d_img_estimator = CLUBSample(args.diffusion_image_dim, args.diffusion_image_dim, args.diffusion_image_dim)
         self.txt_estimator = CLUBSample(args.txt_dim, args.txt_dim, args.txt_dim)
+        self.c_txt_estimator = CLUBSample(args.txt_dim, args.txt_dim, args.txt_dim)
         self.num = args.n_exp
     
 
-    def forward(self, embeddings):
+    def forward(self, embeddings, extra_embeddings=None):
         strs, imgs, txts = embeddings
-        bzs, n_exp, _ = strs.size()
+        bzs, n_exp, _ = imgs.size()
         assert n_exp == self.num
         idx1, idx2 = random.sample(range(n_exp), k=2)
+        
+        # 基础三元组采样
         str1, str2 = strs[:, idx1, :], strs[:, idx2, :]
         img1, img2 = imgs[:, idx1, :], imgs[:, idx2, :]
         txt1, txt2 = txts[:, idx1, :], txts[:, idx2, :]
-        mi_loss = (
-            self.str_estimator(str1, str2)
-            + self.img_estimator(img1, img2)
-            + self.txt_estimator(txt1, txt2)
-        ) / 3.0
+        
+        mi_loss = 0.0
+        count = 0  # 记录使用的估计器数量
+        
+        # 始终使用的基础估计器
+        mi_loss += self.str_estimator(str1, str2)
+        mi_loss += self.img_estimator(img1, img2)
+        mi_loss += self.txt_estimator(txt1, txt2)
+        count += 3
+        
+        # 处理额外估计器（可独立控制）
+        if extra_embeddings is not None:
+            c_imgs, c_txts, d_imgs = extra_embeddings
+            if c_imgs is not None:
+                c_img1, c_img2 = c_imgs[:, idx1, :], c_imgs[:, idx2, :]
+                mi_loss += self.c_img_estimator(c_img1, c_img2)
+                count += 1
+            if c_txts is not None:
+                c_txt1, c_txt2 = c_txts[:, idx1, :], c_txts[:, idx2, :]
+                mi_loss += self.c_txt_estimator(c_txt1, c_txt2)
+                count += 1
+            if d_imgs is not None:
+                d_imgs1, d_imgs2 = d_imgs[:, idx1, :], d_imgs[:, idx2, :]
+                mi_loss += self.d_img_estimator(d_imgs1, d_imgs2)
+                count += 1
+        
+        mi_loss = mi_loss / (2.0 * count)
         return mi_loss
 
-    def train_estimator(self, embeddings):
+    def train_estimator(self, embeddings, extra_embeddings=None):
         strs, imgs, txts = embeddings
-        bzs, n_exp, _ = strs.size()
+        bzs, n_exp, _ = imgs.size()
         assert n_exp == self.num
         idx1, idx2 = random.sample(range(n_exp), k=2)
+        
         str1, str2 = strs[:, idx1, :], strs[:, idx2, :]
         img1, img2 = imgs[:, idx1, :], imgs[:, idx2, :]
         txt1, txt2 = txts[:, idx1, :], txts[:, idx2, :]
-        est_loss = (
-            self.str_estimator.learning_loss(str1, str2)
-            + self.img_estimator.learning_loss(img1, img2)
-            + self.txt_estimator.learning_loss(txt1, txt2)
-        ) / 3.0
+        
+        est_loss = 0.0
+        count = 0
+        
+        # 基础估计器
+        est_loss += self.str_estimator.learning_loss(str1, str2)
+        est_loss += self.img_estimator.learning_loss(img1, img2)
+        est_loss += self.txt_estimator.learning_loss(txt1, txt2)
+        count += 3
+        
+        if extra_embeddings is not None:
+            c_imgs, c_txts, d_imgs = extra_embeddings
+            if c_imgs is not None:
+                c_img1, c_img2 = c_imgs[:, idx1, :], c_imgs[:, idx2, :]
+                est_loss += self.c_img_estimator.learning_loss(c_img1, c_img2)
+                count += 1
+            if c_txts is not None:
+                c_txt1, c_txt2 = c_txts[:, idx1, :], c_txts[:, idx2, :]
+                est_loss += self.c_txt_estimator.learning_loss(c_txt1, c_txt2)
+                count += 1
+            if d_imgs is not None:
+                d_imgs1, d_imgs2 = d_imgs[:, idx1, :], d_imgs[:, idx2, :]
+                est_loss += self.d_img_estimator.learning_loss(d_imgs1, d_imgs2)
+                count += 1
+        
+        est_loss = est_loss / (2.0 * count)
         return est_loss
+
