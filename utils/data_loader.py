@@ -174,6 +174,19 @@ class ConvECorpus(Corpus):
         kcca = KCCA(latent_dimensions=1)
 
         def _branch_metrics(scores, y, target):
+             # ===== 新增：统计正确/错误样本的 top1-top2 平均差值 =====
+            pred = torch.argmax(scores, dim=1)                 # 预测类别
+            correct = (pred == target)                         # 是否正确
+            topk_vals, _ = torch.topk(scores, 2, dim=1)       # 取前两大分数
+            margins = topk_vals[:, 0] - topk_vals[:, 1]        # top1 - top2
+            correct_margins = margins[correct]
+            incorrect_margins = margins[~correct]
+            avg_correct = correct_margins.mean().item() if correct_margins.numel() > 0 else float('nan')
+            avg_incorrect = incorrect_margins.mean().item() if incorrect_margins.numel() > 0 else float('nan')
+            print(f"Correct samples average top1-top2 margin: {avg_correct:.4f}, "
+                f"Incorrect samples average top1-top2 margin: {avg_incorrect:.4f}")
+            # ===== 新增结束 =====
+            
             b_range = torch.arange(scores.shape[0], device=scores.device)
             target_score = scores[b_range, target]          # 先把正例分抠出来
             max_score = scores.max(dim=1)[0]                # 每样本最高分数 (batch_size,)
@@ -200,13 +213,13 @@ class ConvECorpus(Corpus):
             if weights is None:
                 weights = torch.zeros((len(pred_list), pred_list[0].shape[0]), device=device)
                 if 'mean' in strategy:
-                    weights += [1.0 / len(pred_list)] * pred_list[0].shape[0]
+                    pass
                 if 'confidence' in strategy:
                     top1 = [torch.max(p, dim=1)[0] for p in pred_list]
                     top2 = [torch.topk(p, k=2, dim=1)[0][:, 1] for p in pred_list]
-                    margins = torch.tensor([t1 - t2 for t1, t2 in zip(top1, top2)], device=device)
-                    entropy = torch.tensor([-(p * torch.log(p + 1e-10)).sum(dim=1) for p in pred_list], device=device)
-                    std = torch.tensor([torch.std(p, dim=1) for p in pred_list], device=device)
+                    margins = torch.stack([t1 - t2 for t1, t2 in zip(top1, top2)], dim=0)
+                    entropy = torch.stack([-(p * torch.log(p + 1e-10)).sum(dim=1) for p in pred_list], dim=0)
+                    std = torch.stack([torch.std(p, dim=1) for p in pred_list], dim=0)
                     confidence_score = margins
                     weights += alpha * confidence_score
                 if 'redundancy' in strategy:
@@ -248,7 +261,12 @@ class ConvECorpus(Corpus):
                     weights += gamma * (-conflict)
             weights = torch.tensor(weights, device=device)
             weights = torch.softmax(weights, dim=0)
-            pred = sum([w * p for w, p in zip(weights, pred_list)])
+            pred = []
+            for i in range(weights.shape[1]):
+                pred_i = sum([w[i] * p[i] for w, p in zip(weights, pred_list)])
+                pred.append(pred_i)
+            pred = torch.stack(pred, dim=0)
+            # print(pred.shape)
             return pred
 
         if split == 'val':
