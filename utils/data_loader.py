@@ -174,18 +174,19 @@ class ConvECorpus(Corpus):
         kcca = KCCA(latent_dimensions=1)
 
         def _branch_metrics(scores, y, target):
-             # ===== 新增：统计正确/错误样本的 top1-top2 平均差值 =====
-            pred = torch.argmax(scores, dim=1)                 # 预测类别
-            correct = (pred == target)                         # 是否正确
-            topk_vals, _ = torch.topk(scores, 2, dim=1)       # 取前两大分数
-            margins = topk_vals[:, 0] - topk_vals[:, 1]        # top1 - top2
-            correct_margins = margins[correct]
-            incorrect_margins = margins[~correct]
-            avg_correct = correct_margins.mean().item() if correct_margins.numel() > 0 else float('nan')
-            avg_incorrect = incorrect_margins.mean().item() if incorrect_margins.numel() > 0 else float('nan')
-            print(f"Correct samples average top1-top2 margin: {avg_correct:.4f}, "
-                f"Incorrect samples average top1-top2 margin: {avg_incorrect:.4f}")
-            # ===== 新增结束 =====
+            #  # ===== 新增：统计正确/错误样本的 top1-top2 平均差值 =====
+            # pred = torch.argmax(scores, dim=1)                 # 预测类别
+            # target_torch = torch.tensor(target, device=scores.device)  # 确保 target 在同一设备上
+            # correct = (pred == target_torch)                         # 是否正确
+            # topk_vals, _ = torch.topk(scores, 2, dim=1)       # 取前两大分数
+            # margins = topk_vals[:, 0] - topk_vals[:, 1]        # top1 - top2
+            # correct_margins = margins[correct]
+            # incorrect_margins = margins[~correct]
+            # avg_correct = correct_margins.mean().item() if correct_margins.numel() > 0 else float('nan')
+            # avg_incorrect = incorrect_margins.mean().item() if incorrect_margins.numel() > 0 else float('nan')
+            # print(f"Correct samples average top1-top2 margin: {avg_correct:.4f}, "
+            #     f"Incorrect samples average top1-top2 margin: {avg_incorrect:.4f}")
+            # # ===== 新增结束 =====
             
             b_range = torch.arange(scores.shape[0], device=scores.device)
             target_score = scores[b_range, target]          # 先把正例分抠出来
@@ -206,7 +207,7 @@ class ConvECorpus(Corpus):
                 ranks.append(np.where(sorted_idx == rand)[0][0] + 1)
             return ranks, target_score, max_score
         
-        def _late_fusion(pred_list, weights=None, strategy=['mean']):
+        def _late_fusion(pred_list, weights=None, strategy=['confidence', 'redundancy']):
             alpha = 1
             beta = 1
             gamma = 1
@@ -220,7 +221,8 @@ class ConvECorpus(Corpus):
                     margins = torch.stack([t1 - t2 for t1, t2 in zip(top1, top2)], dim=0)
                     entropy = torch.stack([-(p * torch.log(p + 1e-10)).sum(dim=1) for p in pred_list], dim=0)
                     std = torch.stack([torch.std(p, dim=1) for p in pred_list], dim=0)
-                    confidence_score = margins
+                    # print("margins: {:.4f}, entropy: {:.4f}, std: {:.4f}".format(margins.mean().item(), entropy.mean().item(), std.mean().item()))
+                    confidence_score = margins - entropy - std
                     weights += alpha * confidence_score
                 if 'redundancy' in strategy:
                     redundancy = []
