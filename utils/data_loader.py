@@ -242,7 +242,7 @@ class ConvECorpus(Corpus):
                                 corr = [scipy.stats.spearmanr(j.cpu().numpy(), i.cpu().numpy())[0] for i, j in zip(rank_i, rank_j)]
                                 redundant_score = torch.max(redundant_score, torch.tensor(corr, device=device))
                         redundancy.append(redundant_score)
-                    redundancy = torch.tensor(redundancy, device=device)
+                    redundancy = torch.stack(redundancy, dim=0)
                     weights += beta * (-redundancy)
                 if 'conflict' in strategy:
                     assert 'confidence' in strategy, "Conflict strategy requires confidence strategy to be enabled."
@@ -260,6 +260,7 @@ class ConvECorpus(Corpus):
                                 overlap = torch.tensor([len(set(topk_i[k].cpu().numpy()).intersection(set(topk_j[k].cpu().numpy()))) for k in range(topk_i.shape[0])], device=device)
                                 conflict_score += torch.mean(confidence_score * (1.0 - overlap.float() / K))
                         conflict.append(conflict_score)
+                    conflict = torch.stack(conflict, dim=0)
                     weights += gamma * (-conflict)
             weights = torch.tensor(weights, device=device)
             weights = torch.softmax(weights, dim=0)
