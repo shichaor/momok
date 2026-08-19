@@ -4,3 +4,4 @@ log/
 checkpoint/
 figs/
 datasets/
+run.sh
